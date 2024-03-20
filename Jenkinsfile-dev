@@ -1,0 +1,88 @@
+BUILD_NUMBER = env.BUILD_ID
+JOB_NAME = env.JOB_NAME
+def delimiterIndex = JOB_NAME.indexOf('-')
+PROJECT_ENV = JOB_NAME.substring(0, delimiterIndex)
+PROJECT_NAME = JOB_NAME.substring(delimiterIndex + 1)
+
+node(){
+    wrap([$class: 'BuildUser']) {
+        buildDescription(env.BUILD_USER_ID)
+        user = env.BUILD_USER
+    }
+    ansiColor('xterm') {
+        timestamps{
+
+            properties([
+                disableConcurrentBuilds(),
+                buildDiscarder(logRotator(artifactDaysToKeepStr: '7', artifactNumToKeepStr: '2', daysToKeepStr: '', numToKeepStr: '5'))
+            ])
+
+            try{
+                stage("Git Clone"){
+                    retry(3) {
+                        checkout scmGit(
+                            branches: [[name: '*/dev']], 
+                            extensions: [cleanBeforeCheckout(deleteUntrackedNestedRepositories: true)], 
+                            userRemoteConfigs: [
+                                [credentialsId: 'e9a7effd-2167-4b8a-86dc-244e40620483', 
+                                url: "https://codeup.aliyun.com/6145b2b428003bdc3daa97c8/front-platform/${PROJECT_NAME}.git"]
+                            ]
+                        )
+                    }
+                }
+                
+                stage("Nppm Build"){
+                    nodejs('node-v16.20.2') {
+                        sh """
+                            node -v
+                            npm -v
+                            npm config set registry "https://registry.npmmirror.com"
+                            npm config set sharp_binary_host "https://npmmirror.com/mirrors/sharp"
+                            npm config set sharp_libvips_binary_host "https://npmmirror.com/mirrors/sharp-libvips"
+                            npm install
+                            npm run build:dev
+                            tar -cf ${PROJECT_NAME}.tar --exclude='node_modules' .
+
+                        """
+                        // archiveArtifacts allowEmptyArchive: true, 
+                        //     artifacts: 'test.tar', 
+                        //     followSymlinks: false
+                        // sh "rm -f test.tar"
+                    }
+                }
+
+                stage("Docker Build"){
+                    sh """
+                        cat > Dockerfile << EOF
+FROM node:16-alpine
+WORKDIR /app
+ENV HOST 0.0.0.0
+ENV TZ=shanghai
+ENV NAMESPACE=default
+EXPOSE 3000
+RUN mkdir -p /app
+COPY . /app/
+CMD ["npm", "run", "start:dev" ]
+EOF
+                    """
+                    withDockerRegistry(credentialsId: "a06e77f3-1a7f-4a8f-a58b-21a995e924b8", url: "https://simba.tencentcloudcr.com"){
+                        sh "docker build -t simba.tencentcloudcr.com/test-operationplatform/${PROJECT_NAME}:v${BUILD_NUMBER} ."
+                        sh "docker push simba.tencentcloudcr.com/test-operationplatform/${PROJECT_NAME}:v${BUILD_NUMBER}"
+                    }
+                    
+                }
+
+            }catch(Exception err){
+                println(err)
+                currentBuild.result = 'FAILURE'
+                if(err.toString().contains('FlowInterruptedException')){
+                    currentBuild.result = 'ABORTED'
+                }
+            }finally{
+                archiveArtifacts allowEmptyArchive: true, 
+                    artifacts: "${PROJECT_NAME}.tar", 
+                    followSymlinks: false
+            }
+        }
+    }
+}
